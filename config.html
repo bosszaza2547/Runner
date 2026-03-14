@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Drag Game Example</title>
+  <link rel="icon" href="data:,">
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3/dist/phaser.js"></script>
+</head>
+<body>
+
+<script>
+class StartScene extends Phaser.Scene {
+  constructor() {
+    super('start');
+  }
+
+  create() {
+    // Skip directly to main game
+    this.scene.start('main');
+  }
+}
+
+class MainScene extends Phaser.Scene {
+  constructor() {
+    super('main');
+  }
+
+  preload() {
+  // Load the background image
+  this.load.image('background', 'assets/background.jpeg');
+  
+  // Load blue and red square images
+  this.load.image('blue', 'assets/blue.png');
+  this.load.image('red', 'assets/red.png');
+  
+  // Load the player spritesheet (5 frames)
+  this.load.spritesheet('player', 'assets/player.png', { 
+    frameWidth: 80, 
+    frameHeight: 80 
+  });
+  
+  // Load sound effects
+  this.load.audio('click', 'assets/click.wav');
+  this.load.audio('powerup', 'assets/powerup.wav');
+  this.load.audio('powerdown', 'assets/powerdown.wav');
+  
+  // Load music tracks
+  this.load.audio('menuMusic', 'assets/menu_music.wav');
+  this.load.audio('gameplayMusic', 'assets/gameplay_music.wav');
+  this.load.audio('victoryMusic', 'assets/victory_music.wav');
+  }
+
+  create() {
+    this.countdown = 15;
+    this.isHolding = false;
+    this.targetX = 240;
+    this.fallingSquares = [];
+    this.score = 0;
+    this.clones = [];
+    this.gameStarted = false;
+    this.endingSequence = false;
+    this.isReplay = false; // Track if this is a replay
+
+    // Check if coming from replay
+    if (this.scene.settings.data && this.scene.settings.data.replay) {
+      this.isReplay = true;
+    }
+
+    // Add background image
+    this.background = this.add.image(240, 400, 'background');
+    this.background.setDisplaySize(480, 800);
+    this.background.setDepth(-1); // Keep it behind everything
+
+    // Create animations
+    this.anims.create({
+      key: 'idle',
+      frames: [{ key: 'player', frame: 0 }],
+      frameRate: 1
+    });
+
+    this.anims.create({
+      key: 'playing',
+      frames: this.anims.generateFrameNumbers('player', { start: 1, end: 2 }),
+      frameRate: 6,
+      repeat: -1
+    });
+
+    this.anims.create({
+      key: 'victory',
+      frames: this.anims.generateFrameNumbers('player', { start: 3, end: 4 }),
+      frameRate: 6,
+      repeat: -1
+    });
+
+    // Timer (hidden at start)
+    this.timerText = this.add.text(240, 60, this.countdown, {
+      fontSize: "60px",
+      color: "#000000",
+      fontStyle: "bold",
+      stroke: "#ffffff",
+      strokeThickness: 6
+    }).setOrigin(0.5).setVisible(false);
+
+    // Player sprite
+    const squareY = 800 * 0.66;
+    this.square = this.add.sprite(240, squareY, 'player');
+    this.square.play('idle'); // Start with idle animation
+    
+    // Score text on player square
+    this.scoreText = this.add.text(240, squareY - 50, this.score, {
+      fontSize: "32px",
+      color: "#ffffff",
+      stroke: "#000000",
+      strokeThickness: 4
+    }).setOrigin(0.5);
+
+    // Start text
+    this.tapText = this.add.text(240, 300, "Drag to Start!", {
+      fontSize: "36px",
+      color: "#ffffff"
+    }).setOrigin(0.5);
+
+    // Start menu music only on replay (to avoid AudioContext warning on first load)
+    if (this.isReplay) {
+      this.menuMusic = this.sound.add('menuMusic', { loop: true, volume: 0.5 });
+      this.menuMusic.play();
+    }
+
+    // Input events
+    this.input.on('pointerdown', (pointer) => {
+      if (!this.gameStarted) {
+        this.sound.play('click'); // Play click sound when starting
+        this.startGame();
+      }
+      this.isHolding = true;
+      this.targetX = pointer.x;
+    });
+
+    this.input.on('pointerup', () => {
+      this.isHolding = false;
+    });
+
+    this.input.on('pointermove', (pointer) => {
+      if (this.isHolding) {
+        this.targetX = Phaser.Math.Clamp(pointer.x, 40, 440);
+      }
+    });
+  }
+
+  startGame() {
+    this.gameStarted = true;
+    this.tapText.destroy();
+    this.timerText.setVisible(true);
+    
+    // Stop menu music if it's playing
+    if (this.menuMusic) {
+      this.menuMusic.stop();
+    }
+    
+    // Start gameplay music (no loop, 12 seconds)
+    this.gameplayMusic = this.sound.add('gameplayMusic', { loop: false, volume: 0.6 });
+    this.gameplayMusic.play();
+    
+    // Start playing animation
+    this.square.play('playing');
+
+    // Timer countdown
+    this.timeEvent = this.time.addEvent({
+      delay: 1000,
+      callback: () => {
+        this.countdown--;
+        this.timerText.setText(this.countdown);
+        
+        // Stop spawning at 12 second mark (3 seconds remaining)
+        if (this.countdown === 3) {
+          if (this.spawnEvent) this.spawnEvent.remove(false);
+          this.startEndingSequence();
+        }
+        
+        if (this.countdown <= 0) this.endGame();
+      },
+      loop: true
+    });
+
+    // Spawn falling squares every 2 seconds
+    this.spawnEvent = this.time.addEvent({
+      delay: 2000,
+      callback: () => {
+        const positions = [120, 360];
+        const x = Phaser.Math.RND.pick(positions);
+        const otherX = x === 120 ? 360 : 120;
+        
+        if (this.score === 0) {
+          // When score = 0, spawn two blue squares
+          const blueNum1 = Phaser.Math.Between(1, 10);
+          const blueNum2 = Phaser.Math.Between(1, 10);
+          
+          const blueSquare1 = this.add.image(x, -100, 'blue');
+          blueSquare1.setDisplaySize(200, 200);
+          const blueText1 = this.add.text(x, -100, "+ " + blueNum1, {
+            fontSize: "48px",
+            color: "#ffffff"
+          }).setOrigin(0.5);
+          this.fallingSquares.push({ square: blueSquare1, text: blueText1, value: blueNum1 });
+          
+          const blueSquare2 = this.add.image(otherX, -100, 'blue');
+          blueSquare2.setDisplaySize(200, 200);
+          const blueText2 = this.add.text(otherX, -100, "+ " + blueNum2, {
+            fontSize: "48px",
+            color: "#ffffff"
+          }).setOrigin(0.5);
+          this.fallingSquares.push({ square: blueSquare2, text: blueText2, value: blueNum2 });
+        } else {
+          // When score > 1, spawn one blue and one red
+          const maxRedValue = Math.min(this.score - 1, 10);
+          const redNum = Phaser.Math.Between(1, maxRedValue);
+          const blueNum = Phaser.Math.Between(1, 10);
+          
+          // Red square at random position
+          const fallingSquare = this.add.image(x, -100, 'red');
+          fallingSquare.setDisplaySize(200, 200);
+          const redText = this.add.text(x, -100, "- " + redNum, {
+            fontSize: "48px",
+            color: "#ffffff"
+          }).setOrigin(0.5);
+          this.fallingSquares.push({ square: fallingSquare, text: redText, value: -redNum });
+          
+          // Blue square at opposite position
+          const blueSquare = this.add.image(otherX, -100, 'blue');
+          blueSquare.setDisplaySize(200, 200);
+          const blueText = this.add.text(otherX, -100, "+ " + blueNum, {
+            fontSize: "48px",
+            color: "#ffffff"
+          }).setOrigin(0.5);
+          this.fallingSquares.push({ square: blueSquare, text: blueText, value: blueNum });
+        }
+      },
+      loop: true
+    });
+  }
+
+  startEndingSequence() {
+    this.endingSequence = true;
+    this.targetX = 240; // Move player to center
+    
+    // Stop gameplay music and start victory music (looping)
+    if (this.gameplayMusic) {
+      this.gameplayMusic.stop();
+    }
+    this.victoryMusic = this.sound.add('victoryMusic', { loop: true, volume: 0.5 });
+    this.victoryMusic.play();
+    
+    // Switch to victory animation
+    this.square.play('victory');
+    
+    // Switch all clones to victory animation
+    this.clones.forEach(clone => {
+      if (clone && clone.scene) {
+        clone.play('victory');
+      }
+    });
+    
+    // Clear all falling squares
+    this.fallingSquares.forEach(fs => {
+      if (fs.square && fs.square.scene) fs.square.destroy();
+      if (fs.text && fs.text.scene) fs.text.destroy();
+    });
+    this.fallingSquares = [];
+    
+    // Calculate grid positions for clones
+    this.calculateGridPositions();
+  }
+
+  calculateGridPositions() {
+    const numClones = this.clones.length;
+    if (numClones === 0) return;
+    
+    // Calculate grid dimensions
+    const cols = Math.ceil(Math.sqrt(numClones));
+    const rows = Math.ceil(numClones / cols);
+    
+    const spacing = 60;
+    const gridWidth = (cols - 1) * spacing;
+    const gridHeight = (rows - 1) * spacing;
+    const startX = 240 - gridWidth / 2;
+    const startY = 300 - gridHeight / 2;
+    
+    // Calculate how many clones in the incomplete top row
+    const remainder = numClones % cols;
+    const topRowCount = remainder === 0 ? cols : remainder;
+    
+    // Assign target positions to each clone (incomplete row on top)
+    for (let i = 0; i < this.clones.length; i++) {
+      const clone = this.clones[i];
+      
+      if (i < topRowCount) {
+        // Top incomplete row - centered
+        const topRowWidth = (topRowCount - 1) * spacing;
+        const topStartX = 240 - topRowWidth / 2;
+        clone.targetX = topStartX + i * spacing;
+        clone.targetY = startY;
+      } else {
+        // Remaining rows - full width
+        const adjustedIndex = i - topRowCount;
+        const col = adjustedIndex % cols;
+        const row = Math.floor(adjustedIndex / cols) + 1;
+        
+        clone.targetX = startX + col * spacing;
+        clone.targetY = startY + row * spacing;
+      }
+    }
+  }
+
+  update() {
+    // Don't update if game ended or not started
+    if (!this.square || !this.square.scene || !this.gameStarted) return;
+    
+    // Smooth movement: lerp toward targetX
+    this.square.x = Phaser.Math.Linear(this.square.x, this.targetX, 0.15);
+    
+    // Update clones count based on score
+    const neededClones = this.score;
+    
+    // Add clones if needed
+    while (this.clones.length < neededClones) {
+      const angle = Math.random() * Math.PI * 0.8 + Math.PI * 0.6;
+      const distance = 60 + Math.random() * 60;
+      const clone = this.add.sprite(
+        this.square.x + Math.cos(angle) * distance, 
+        this.square.y + Math.abs(Math.sin(angle)) * distance, 
+        'player'
+      );
+      clone.setScale(0.5); // Make clones half size (40x40)
+      clone.setAlpha(0.8);
+      
+      // Random color tint for each clone
+      const randomColor = Phaser.Display.Color.RandomRGB();
+      clone.setTint(randomColor.color);
+      
+      clone.play('playing'); // Clones play the same animation as player
+      this.clones.push(clone);
+    }
+    
+    // Remove clones if needed
+    while (this.clones.length > neededClones) {
+      const clone = this.clones.pop();
+      if (clone && clone.scene) {
+        clone.destroy();
+      }
+    }
+    
+    // Update clone positions with flocking behavior
+    for (let i = this.clones.length - 1; i >= 0; i--) {
+      const clone = this.clones[i];
+      if (!clone || !clone.scene) continue;
+      
+      if (this.endingSequence) {
+        // During ending sequence: move to grid positions
+        const dx = clone.targetX - clone.x;
+        const dy = clone.targetY - clone.y;
+        
+        clone.x += dx * 0.1;
+        clone.y += dy * 0.1;
+      } else {
+        // Normal flocking behavior
+        // Move towards player (but stay behind)
+        const dx = this.square.x - clone.x;
+        const dy = this.square.y - clone.y;
+        const distToPlayer = Math.sqrt(dx * dx + dy * dy);
+        
+        const minDist = 80;
+        const maxDist = 150;
+        
+        let forceX = 0;
+        let forceY = 0;
+        
+        // Follow player
+        if (distToPlayer > maxDist) {
+          forceX += (dx / distToPlayer) * 3;
+          forceY += (dy / distToPlayer) * 3;
+        } else if (distToPlayer < minDist) {
+          forceX -= (dx / distToPlayer) * 1.5;
+          forceY -= (dy / distToPlayer) * 1.5;
+        }
+        
+        // Strong push to stay below/behind the player
+        if (clone.y < this.square.y + 50) {
+          forceY += 2.5;
+        }
+        
+        // Avoid other clones
+        for (let j = 0; j < this.clones.length; j++) {
+          if (i === j) continue;
+          const other = this.clones[j];
+          if (!other || !other.scene) continue;
+          
+          const odx = clone.x - other.x;
+          const ody = clone.y - other.y;
+          const dist = Math.sqrt(odx * odx + ody * ody);
+          
+          if (dist < 55 && dist > 0) {
+            forceX += (odx / dist) * 3;
+            forceY += (ody / dist) * 3;
+          }
+        }
+        
+        // Apply forces
+        clone.x += forceX;
+        clone.y += forceY;
+        
+        // Keep clones in bounds
+        clone.x = Phaser.Math.Clamp(clone.x, 20, 460);
+        clone.y = Phaser.Math.Clamp(clone.y, this.square.y + 40, 780);
+      }
+    }
+    
+    // Bring player and score text to front
+    this.square.setDepth(1000);
+    this.scoreText.setDepth(1001);
+    
+    // Move score text with player square (above the player)
+    this.scoreText.x = this.square.x;
+    this.scoreText.y = this.square.y - 50;
+
+    // Move falling squares downward
+    for (let i = this.fallingSquares.length - 1; i >= 0; i--) {
+      const fs = this.fallingSquares[i];
+      fs.square.y += 5;
+      fs.text.y += 5;
+      
+      // Check collision with player square
+      const bounds = fs.square.getBounds();
+      const playerBounds = this.square.getBounds();
+      
+      if (Phaser.Geom.Intersects.RectangleToRectangle(bounds, playerBounds)) {
+        // Play appropriate sound
+        if (fs.value > 0) {
+          this.sound.play('powerup'); // Blue square collected
+        } else {
+          this.sound.play('powerdown'); // Red square collected
+        }
+        
+        this.score += fs.value;
+        this.scoreText.setText(this.score);
+        
+        // Find and remove the paired square
+        for (let j = this.fallingSquares.length - 1; j >= 0; j--) {
+          if (i !== j && Math.abs(this.fallingSquares[j].square.y - fs.square.y) < 50) {
+            this.fallingSquares[j].square.destroy();
+            this.fallingSquares[j].text.destroy();
+            this.fallingSquares.splice(j, 1);
+            if (j < i) i--;
+            break;
+          }
+        }
+        
+        // Remove the touched square
+        fs.square.destroy();
+        fs.text.destroy();
+        this.fallingSquares.splice(i, 1);
+        continue;
+      }
+      
+      // Remove if off screen
+      if (fs.square.y > 850) {
+        fs.square.destroy();
+        fs.text.destroy();
+        this.fallingSquares.splice(i, 1);
+      }
+    }
+  }
+
+  endGame() {
+    if (this.timeEvent) this.timeEvent.remove(false);
+    if (this.spawnEvent) this.spawnEvent.remove(false);
+    
+    // Stop update loop
+    this.scene.pause();
+    
+    // Clean up clones
+    for (let i = this.clones.length - 1; i >= 0; i--) {
+      const clone = this.clones[i];
+      if (clone && clone.scene) {
+        clone.destroy();
+      }
+    }
+    this.clones = [];
+    
+    if (this.square && this.square.scene) this.square.destroy();
+    if (this.timerText && this.timerText.scene) this.timerText.destroy();
+    if (this.scoreText && this.scoreText.scene) this.scoreText.destroy();
+
+    // Clean up falling squares
+    this.fallingSquares.forEach(fs => {
+      if (fs.square && fs.square.scene) fs.square.destroy();
+      if (fs.text && fs.text.scene) fs.text.destroy();
+    });
+    this.fallingSquares = [];
+    
+    // Change background to grey
+    if (this.background) {
+      this.background.destroy();
+    }
+    this.cameras.main.setBackgroundColor('#222222');
+    
+    // Resume to show end screen
+    this.scene.resume();
+
+    this.add.text(240, 250, "You Win!", {
+      fontSize: "36px",
+      color: "#00ff00"
+    }).setOrigin(0.5);
+
+    this.add.text(240, 320, "Final Score: " + this.score, {
+      fontSize: "32px",
+      color: "#ffffff"
+    }).setOrigin(0.5);
+
+    const ctaButton = this.add.text(240, 400, "Install Now", {
+      fontSize: "28px",
+      color: "#ffffff",
+      backgroundColor: "#28a745",
+      padding: { x: 20, y: 10 }
+    }).setOrigin(0.5).setInteractive();
+    ctaButton.on('pointerdown', () => {
+      this.sound.play('click'); // Play click sound
+      window.open('https://play.google.com/store/games?hl=th', '_blank');
+    });
+
+    const replayButton = this.add.text(240, 480, "Play Again", {
+      fontSize: "28px",
+      color: "#ffffff",
+      backgroundColor: "#4444ff",
+      padding: { x: 20, y: 10 }
+    }).setOrigin(0.5).setInteractive();
+    replayButton.on('pointerdown', () => {
+      this.sound.play('click'); // Play click sound
+      
+      // Stop victory music before restarting
+      if (this.victoryMusic) {
+        this.victoryMusic.stop();
+      }
+      
+      this.scene.start('main', { replay: true }); // Pass replay flag
+    });
+  }
+}
+
+const config = {
+  type: Phaser.WEBGL,
+  width: 480,
+  height: 800,
+  backgroundColor: "#222",
+  scene: [StartScene, MainScene],
+  scale: {
+    mode: Phaser.Scale.FIT,
+    autoCenter: Phaser.Scale.CENTER_BOTH
+  },
+  render: {
+    antialias: true,
+    pixelArt: false,
+    roundPixels: false
+  },
+  loader: {
+    crossOrigin: 'anonymous'
+  }
+};
+
+new Phaser.Game(config);
+</script>
+
+</body>
+</html>
